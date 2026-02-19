@@ -21,3 +21,7 @@ build/
 temp_repos/
 results/*.json
 !results/.gitkeep
+
+.env
+__pycache__/
+temp_repos/

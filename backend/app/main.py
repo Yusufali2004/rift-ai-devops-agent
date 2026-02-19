@@ -1,87 +1,151 @@
 import os
 import time
-from fastapi import FastAPI, BackgroundTasks
+import uuid
+import re
+import json
+from fastapi import FastAPI, BackgroundTasks, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from .schemas import RepoRequest, AgentResponse, FixDetail
-from .git_utils import setup_repo, agent_commit
+from pydantic import BaseModel
+from typing import Dict, List
+
+# Core modules - ensure agent_push is imported from your git_utils
+from .git_utils import agent_commit, agent_push, setup_repo_isolated
 from .test_runner import discover_and_run_tests
-from .agent_engine import get_llm_fix, apply_patch
+from .agent_engine import get_agent_fix, apply_patch
 from .scorer import calculate_final_score
 
-app = FastAPI()
+app = FastAPI(title="RIFT Autonomous DevOps Agent API")
 
-# Enable CORS for the React Frontend
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# In-memory store for the React dashboard to poll
-results_db = {}
+jobs: Dict[str, dict] = {}
+
+class RepoRequest(BaseModel):
+    repo_url: str
+    team_name: str
+    leader_name: str
 
 @app.post("/run-agent")
-async def run_agent(request: RepoRequest, background_tasks: BackgroundTasks):
-    job_id = f"{request.team_name}_{int(time.time())}"
-    background_tasks.add_task(autonomous_loop, job_id, request)
-    return {"job_id": job_id, "status": "started"}
+async def start_agent(request: RepoRequest, background_tasks: BackgroundTasks):
+    job_id = str(uuid.uuid4())
+    jobs[job_id] = {"status": "processing", "progress": "Initializing Agentic Loop...", "data": None}
+    background_tasks.add_task(run_healing_loop, job_id, request)
+    return {"job_id": job_id, "loading": True}
 
 @app.get("/results/{job_id}")
 async def get_results(job_id: str):
-    return results_db.get(job_id, {"status": "processing"})
+    if job_id not in jobs:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return jobs[job_id]
 
-async def autonomous_loop(job_id, request):
+def extract_failing_file(logs, repo_path):
+    """Targets the source code by ignoring test-prefixed files."""
+    matches = re.findall(r'([\w/\.-]+\.py)', logs)
+    for match in reversed(matches):
+        clean = match.strip(".:")
+        if "test_" in clean or "conftest" in clean:
+            continue
+        if os.path.exists(os.path.join(repo_path, clean)):
+            return clean
+    return "main.py"
+
+async def run_healing_loop(job_id: str, request: RepoRequest):
     start_time = time.time()
-    all_fixes = []
-    
-    # 1. Setup & Branching
-    repo_path, branch_name = setup_repo(request.repo_url, request.team_name, request.leader_name)
-    
+    fixes: List[dict] = []
+    timeline: List[dict] = []
     status = "FAILED"
-    for i in range(5):  # Mandatory 5-retry limit
-        # 2. Run Tests
-        logs, exit_code = discover_and_run_tests(repo_path)
-        
-        if exit_code == 0:
-            status = "PASSED"
-            break
-        
-        # 3. Fix Logic (Surgical LLM Call)
-        # We assume the first .py or .js file mentioned in logs is the culprit
-        # For a hackathon, we focus on 'main.py' or 'app.js' if not found
-        target_file = "main.py" # Simple heuristic for the MVP
-        
-        with open(os.path.join(repo_path, target_file), "r") as f:
-            content = f.read()
+    iteration_count = 0
+    repo_path = ""
+
+    try:
+        # 1. SETUP - Isolated workspace
+        repo_path, branch_name = setup_repo_isolated(request.repo_url, request.team_name, request.leader_name)
+
+        for attempt in range(1, 6):
+            iteration_count = attempt
+            timestamp = time.strftime("%H:%M:%S")
             
-        fix_json = get_llm_fix(logs, content, "LOGIC/SYNTAX")
-        apply_patch(repo_path, target_file, fix_json["fixed_code"])
-        
-        # 4. Commit with [AI-AGENT]
-        agent_commit(repo_path, f"Retry {i+1}: {fix_json['explanation']}")
-        
-        all_fixes.append(FixDetail(
-            file=target_file,
-            bug_type="LOGIC",
-            line=0,
-            message=fix_json["explanation"],
-            status="Fixed"
-        ))
+            # 2. TEST
+            jobs[job_id]["progress"] = f"Running Tests (Attempt {attempt}/5)..."
+            logs, exit_code = discover_and_run_tests(repo_path)
+            
+            timeline.append({
+                "iteration": attempt,
+                "timestamp": timestamp,
+                "status": "PASSED" if exit_code == 0 else "FAILED"
+            })
 
-    end_time = time.time()
-    final_score = calculate_final_score(start_time, end_time, len(all_fixes))
+            if exit_code == 0:
+                status = "PASSED"
+                jobs[job_id]["progress"] = "All tests passed!"
+                break
 
-    # 5. Store Result
-    results_db[job_id] = AgentResponse(
-        repo_url=request.repo_url,
-        team_name=request.team_name,
-        team_leader=request.leader_name,
-        branch_name=branch_name,
-        total_failures=len(all_fixes),
-        total_fixes=len(all_fixes),
-        final_score=final_score,
-        status=status,
-        fixes=all_fixes,
-        processing_time_seconds=round(end_time - start_time, 2)
-    )
+            # 3. ANALYZE
+            jobs[job_id]["progress"] = f"Analyzing failure {attempt}..."
+            target_file = extract_failing_file(logs, repo_path)
+            with open(os.path.join(repo_path, target_file), "r", encoding="utf-8") as f:
+                content = f.read()
+
+            # 4. FIX
+            jobs[job_id]["progress"] = f"AI Healing {target_file}..."
+            fix_data = get_agent_fix(logs, content)
+            apply_patch(repo_path, target_file, fix_data["fixed_code"])
+
+            # 5. COMMIT
+            commit_msg = f"Attempt {attempt}: Fixed {fix_data['bug_type']} in {target_file}"
+            agent_commit(repo_path, commit_msg)
+
+            fixes.append({
+                "file": target_file,
+                "bug_type": fix_data["bug_type"],
+                "line_number": fix_data["line_number"],
+                "commit_message": f"[AI-AGENT] {commit_msg}",
+                "status": "✓ Fixed"
+            })
+
+        # 6. PUSH FIXES TO GITHUB (RIFT Requirement)
+        if len(fixes) > 0:
+            jobs[job_id]["progress"] = "Pushing fixes to new branch..."
+            agent_push(repo_path, branch_name)
+
+        # 7. SCORING & OUTPUT GENERATION
+        total_time = round(time.time() - start_time, 2)
+        score_data = calculate_final_score(start_time, time.time(), len(fixes))
+
+        results = {
+            "run_summary": {
+                "repository_url": request.repo_url,
+                "team_name": request.team_name,
+                "team_leader": request.leader_name,
+                "branch_created": branch_name,
+                "total_failures_detected": len(fixes) if status == "PASSED" else len(fixes) + 1,
+                "total_fixes_applied": len(fixes),
+                "final_status": status,
+                "status_badge_color": "green" if status == "PASSED" else "red",
+                "total_time_seconds": total_time
+            },
+            "score_breakdown": score_data, # Integrated from your scorer.py
+            "fixes_applied": fixes,
+            "ci_cd_timeline": {
+                "iterations_used": f"{iteration_count}/5",
+                "timeline": timeline
+            }
+        }
+
+        # Save results.json for judge evaluation
+        with open(os.path.join(repo_path, "results.json"), "w", encoding="utf-8") as f:
+            json.dump(results, f, indent=4)
+
+        jobs[job_id]["status"] = "completed"
+        jobs[job_id]["data"] = results
+
+    except Exception as e:
+        print(f"❌ Critical Loop Failure: {e}")
+        jobs[job_id]["status"] = "error"
+        jobs[job_id]["progress"] = f"Error: {str(e)}"
