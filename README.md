@@ -10,7 +10,6 @@
 The system follows a **Self-Healing Loop** architecture designed for deterministic recovery.
 
 
-
 1. **Trigger:** The React Dashboard initiates a `POST` request with the target repository.
 2. **Environment Isolation:** The Backend clones the repository and initializes a dedicated branch: `TEAM_NAME_LEADER_NAME_AI_Fix`.
 3. **Execution Sandbox:** Tests are discovered and executed via a sandboxed runner to prevent host-level side effects.
