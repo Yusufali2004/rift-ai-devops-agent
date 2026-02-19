@@ -5,16 +5,24 @@ import re
 import json
 from fastapi import FastAPI, BackgroundTasks, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles # Added for Step 3
 from pydantic import BaseModel
 from typing import Dict, List
 
-# Core modules - ensure agent_push is imported from your git_utils
 from .git_utils import agent_commit, agent_push, setup_repo_isolated
 from .test_runner import discover_and_run_tests
 from .agent_engine import get_agent_fix, apply_patch
 from .scorer import calculate_final_score
 
 app = FastAPI(title="RIFT Autonomous DevOps Agent API")
+
+# Define Results Path (Change 3)
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+RESULTS_FOLDER = os.path.join(BASE_DIR, "results")
+os.makedirs(RESULTS_FOLDER, exist_ok=True)
+
+# Mount the results folder as a static route
+app.mount("/results_static", StaticFiles(directory=RESULTS_FOLDER), name="results_static")
 
 app.add_middleware(
     CORSMiddleware,
@@ -45,7 +53,6 @@ async def get_results(job_id: str):
     return jobs[job_id]
 
 def extract_failing_file(logs, repo_path):
-    """Targets the source code by ignoring test-prefixed files."""
     matches = re.findall(r'([\w/\.-]+\.py)', logs)
     for match in reversed(matches):
         clean = match.strip(".:")
@@ -64,15 +71,12 @@ async def run_healing_loop(job_id: str, request: RepoRequest):
     repo_path = ""
 
     try:
-        # 1. SETUP - Isolated workspace
         repo_path, branch_name = setup_repo_isolated(request.repo_url, request.team_name, request.leader_name)
 
         for attempt in range(1, 6):
             iteration_count = attempt
             timestamp = time.strftime("%H:%M:%S")
             
-            # 2. TEST
-            jobs[job_id]["progress"] = f"Running Tests (Attempt {attempt}/5)..."
             logs, exit_code = discover_and_run_tests(repo_path)
             
             timeline.append({
@@ -83,41 +87,33 @@ async def run_healing_loop(job_id: str, request: RepoRequest):
 
             if exit_code == 0:
                 status = "PASSED"
-                jobs[job_id]["progress"] = "All tests passed!"
                 break
 
-            # 3. ANALYZE
-            jobs[job_id]["progress"] = f"Analyzing failure {attempt}..."
             target_file = extract_failing_file(logs, repo_path)
             with open(os.path.join(repo_path, target_file), "r", encoding="utf-8") as f:
                 content = f.read()
 
-            # 4. FIX
-            jobs[job_id]["progress"] = f"AI Healing {target_file}..."
             fix_data = get_agent_fix(logs, content)
             apply_patch(repo_path, target_file, fix_data["fixed_code"])
 
-            # 5. COMMIT
             commit_msg = f"Attempt {attempt}: Fixed {fix_data['bug_type']} in {target_file}"
             agent_commit(repo_path, commit_msg)
 
             fixes.append({
                 "file": target_file,
                 "bug_type": fix_data["bug_type"],
-                "line_number": fix_data["line_number"],
+                "line_number": fix_data.get("line_number", 0),
                 "commit_message": f"[AI-AGENT] {commit_msg}",
                 "status": "✓ Fixed"
             })
 
-        # 6. PUSH FIXES TO GITHUB (RIFT Requirement)
         if len(fixes) > 0:
-            jobs[job_id]["progress"] = "Pushing fixes to new branch..."
             agent_push(repo_path, branch_name)
 
-        # 7. SCORING & OUTPUT GENERATION
         total_time = round(time.time() - start_time, 2)
         score_data = calculate_final_score(start_time, time.time(), len(fixes))
 
+        # FINAL STRUCTURED OUTPUT FOR DASHBOARD
         results = {
             "run_summary": {
                 "repository_url": request.repo_url,
@@ -130,7 +126,7 @@ async def run_healing_loop(job_id: str, request: RepoRequest):
                 "status_badge_color": "green" if status == "PASSED" else "red",
                 "total_time_seconds": total_time
             },
-            "score_breakdown": score_data, # Integrated from your scorer.py
+            "score_breakdown": score_data, 
             "fixes_applied": fixes,
             "ci_cd_timeline": {
                 "iterations_used": f"{iteration_count}/5",
@@ -138,14 +134,13 @@ async def run_healing_loop(job_id: str, request: RepoRequest):
             }
         }
 
-        # Save results.json for judge evaluation
-        with open(os.path.join(repo_path, "results.json"), "w", encoding="utf-8") as f:
+        # Change 3: Save to project results folder
+        with open(os.path.join(RESULTS_FOLDER, f"{job_id}.json"), "w", encoding="utf-8") as f:
             json.dump(results, f, indent=4)
 
         jobs[job_id]["status"] = "completed"
         jobs[job_id]["data"] = results
 
     except Exception as e:
-        print(f"❌ Critical Loop Failure: {e}")
         jobs[job_id]["status"] = "error"
-        jobs[job_id]["progress"] = f"Error: {str(e)}"
+        jobs[job_id]["progress"] = str(e)
