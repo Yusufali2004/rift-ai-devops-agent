@@ -6,7 +6,7 @@ import subprocess
 # We move the active work directory outside the project root to stop Uvicorn auto-reloads.
 BASE_WORKSPACE = os.path.abspath("C:/rift-agent-workspace")
 
-def setup_repo(repo_url, team_name, leader_name):
+def setup_repo_isolated(repo_url, team_name, leader_name):
     """
     Clones the repository and prepares the mandatory RIFT branch.
     """
