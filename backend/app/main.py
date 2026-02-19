@@ -5,10 +5,11 @@ import re
 import json
 from fastapi import FastAPI, BackgroundTasks, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles # Added for Step 3
+from fastapi.staticfiles import StaticFiles 
 from pydantic import BaseModel
 from typing import Dict, List
 
+# Core modules
 from .git_utils import agent_commit, agent_push, setup_repo_isolated
 from .test_runner import discover_and_run_tests
 from .agent_engine import get_agent_fix, apply_patch
@@ -16,7 +17,7 @@ from .scorer import calculate_final_score
 
 app = FastAPI(title="RIFT Autonomous DevOps Agent API")
 
-# Define Results Path (Change 3)
+# Define Results Path
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 RESULTS_FOLDER = os.path.join(BASE_DIR, "results")
 os.makedirs(RESULTS_FOLDER, exist_ok=True)
@@ -31,6 +32,19 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# --- ADDED ROUTES TO FIX 404 ---
+@app.get("/")
+async def root():
+    """Health check for judges and frontend connection testing"""
+    return {
+        "status": "online",
+        "message": "RIFT Agent API is Online",
+        "version": "1.0.0",
+        "team": "Algo Ninjas"
+    }
+
+# -------------------------------
 
 jobs: Dict[str, dict] = {}
 
@@ -71,12 +85,14 @@ async def run_healing_loop(job_id: str, request: RepoRequest):
     repo_path = ""
 
     try:
+        # Ensure setup_repo_isolated is the name in git_utils.py
         repo_path, branch_name = setup_repo_isolated(request.repo_url, request.team_name, request.leader_name)
 
         for attempt in range(1, 6):
             iteration_count = attempt
             timestamp = time.strftime("%H:%M:%S")
             
+            jobs[job_id]["progress"] = f"Running Tests (Attempt {attempt}/5)..."
             logs, exit_code = discover_and_run_tests(repo_path)
             
             timeline.append({
@@ -87,12 +103,15 @@ async def run_healing_loop(job_id: str, request: RepoRequest):
 
             if exit_code == 0:
                 status = "PASSED"
+                jobs[job_id]["progress"] = "All tests passed!"
                 break
 
+            jobs[job_id]["progress"] = f"Analyzing failure {attempt}..."
             target_file = extract_failing_file(logs, repo_path)
             with open(os.path.join(repo_path, target_file), "r", encoding="utf-8") as f:
                 content = f.read()
 
+            jobs[job_id]["progress"] = f"AI Healing {target_file}..."
             fix_data = get_agent_fix(logs, content)
             apply_patch(repo_path, target_file, fix_data["fixed_code"])
 
@@ -108,12 +127,12 @@ async def run_healing_loop(job_id: str, request: RepoRequest):
             })
 
         if len(fixes) > 0:
+            jobs[job_id]["progress"] = "Pushing fixes to GitHub..."
             agent_push(repo_path, branch_name)
 
         total_time = round(time.time() - start_time, 2)
         score_data = calculate_final_score(start_time, time.time(), len(fixes))
 
-        # FINAL STRUCTURED OUTPUT FOR DASHBOARD
         results = {
             "run_summary": {
                 "repository_url": request.repo_url,
@@ -134,7 +153,7 @@ async def run_healing_loop(job_id: str, request: RepoRequest):
             }
         }
 
-        # Change 3: Save to project results folder
+        # Save to project results folder for dashboard
         with open(os.path.join(RESULTS_FOLDER, f"{job_id}.json"), "w", encoding="utf-8") as f:
             json.dump(results, f, indent=4)
 
@@ -142,5 +161,6 @@ async def run_healing_loop(job_id: str, request: RepoRequest):
         jobs[job_id]["data"] = results
 
     except Exception as e:
+        print(f"❌ Critical Loop Failure: {e}")
         jobs[job_id]["status"] = "error"
-        jobs[job_id]["progress"] = str(e)
+        jobs[job_id]["progress"] = f"Error: {str(e)}"
