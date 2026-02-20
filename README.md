@@ -3,7 +3,7 @@
 **Leader:** Md Yusuf Ali
 
 ## 🚀 Live Demo & Video
-- **Live Dashboard:** [Insert Vercel Link]
+- **Live Dashboard:** https://rift-ai-devops-agent.vercel.app
 - **LinkedIn Demo:** [Insert LinkedIn Video Link]
 
 ## 🏗 System Architecture
