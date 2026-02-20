@@ -4,7 +4,8 @@
 
 ## 🚀 Live Demo & Video
 - **Live Dashboard:** https://rift-ai-devops-agent.vercel.app
-- **LinkedIn Demo:** [Insert LinkedIn Video Link]
+- **LinkedIn Demo:** [LinkedIn Post](https://www.linkedin.com/posts/md-yusuf-ali-_rift2026-activity-7430421159927537665-kiD0?utm_source=share&utm_medium=member_android&rcm=ACoAADodLfYBY_EZsUvRi6Nqo9dGHfrBOYTUpyA)
+- 
 
 ## 🏗 System Architecture
 The system follows a **Self-Healing Loop** architecture designed for deterministic recovery.
