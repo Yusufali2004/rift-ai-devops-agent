@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { Play, CheckCircle, Clock, Award, GitBranch, Terminal, ShieldCheck } from 'lucide-react';
 
-const API_BASE = "https://algo-ninjas-backend.onrender.com";
+const API_BASE = "https://algo-ninjas-api.onrender.com";
 
 export default function App() {
   const [loading, setLoading] = useState(false);
